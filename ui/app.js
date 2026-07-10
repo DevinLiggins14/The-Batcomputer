@@ -676,6 +676,47 @@ async function loadModels() {
   }
 }
 
+// ---------- drag & drop attachments ----------
+
+const BINARY_EXT = /\.(png|jpe?g|gif|webp|bmp|ico|icns|pdf|zip|gz|bz2|xz|tar|7z|rar|dmg|pkg|app|exe|dll|dylib|so|o|a|woff2?|ttf|otf|eot|mp[34]|m4[av]|mov|avi|mkv|wav|flac|ogg|gguf|safetensors|bin|pt|onnx|sqlite|db)$/i;
+
+function wireDropZone() {
+  const panel = $('#chat-panel');
+  // stop the browser/Electron from navigating to a dropped file
+  window.addEventListener('dragover', (e) => e.preventDefault());
+  window.addEventListener('drop', (e) => e.preventDefault());
+
+  ['dragenter', 'dragover'].forEach((ev) =>
+    panel.addEventListener(ev, (e) => {
+      e.preventDefault();
+      panel.classList.add('dragover');
+    })
+  );
+  panel.addEventListener('dragleave', (e) => {
+    if (!panel.contains(e.relatedTarget)) panel.classList.remove('dragover');
+  });
+  panel.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    panel.classList.remove('dragover');
+    let attached = 0;
+    for (const f of e.dataTransfer?.files || []) {
+      if (f.size > 2 * 1024 * 1024) { setStatus(`${f.name}: too large to attach (>2MB)`); continue; }
+      if (BINARY_EXT.test(f.name)) { setStatus(`${f.name}: binary file — can't attach as text`); continue; }
+      try {
+        state.attachments.push({ label: f.name, content: await f.text() });
+        attached++;
+      } catch (err) {
+        setStatus(`${f.name}: ${err.message}`);
+      }
+    }
+    if (attached) {
+      renderChips();
+      setStatus(`attached ${attached} file${attached > 1 ? 's' : ''} — sends with your next message`);
+      $('#chat-input').focus();
+    }
+  });
+}
+
 // ---------- system HUD ----------
 
 let ds4Status = null;
@@ -828,6 +869,7 @@ function init() {
   thinkSel.addEventListener('change', () => localStorage.setItem('fc.think', thinkSel.value));
 
   wireDs4Modal();
+  wireDropZone();
   pollSystem();
   setInterval(pollSystem, 5000);
 }

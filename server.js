@@ -5,7 +5,12 @@ const path = require('path');
 const fs = require('fs/promises');
 const fsSync = require('fs');
 const os = require('os');
+const dns = require('node:dns');
 const { execFile, spawn } = require('child_process');
+
+// Prefer IPv4 — broken IPv6 routes are a classic cause of intermittent
+// "fetch failed" from Node's fetch on macOS.
+dns.setDefaultResultOrder?.('ipv4first');
 
 const OLLAMA = process.env.OLLAMA_HOST_URL || 'http://127.0.0.1:11434';
 // DwarfStar (ds4) — local DeepSeek V4 Flash server, fully offline.
@@ -370,40 +375,100 @@ function assertPublicHttpUrl(raw) {
   return u;
 }
 
-const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36';
+const BROWSER_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
-async function webSearch(query) {
-  const r = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
-    headers: { 'User-Agent': BROWSER_UA },
-    signal: AbortSignal.timeout(15000),
+const errCode = (err) => err.cause?.code || err.cause?.message || err.message;
+
+async function engineFetch(url) {
+  const r = await fetch(url, {
+    headers: { 'User-Agent': BROWSER_UA, 'Accept-Language': 'en-US,en;q=0.9' },
+    signal: AbortSignal.timeout(12000),
+    redirect: 'follow',
   });
-  if (!r.ok) throw new Error(`search failed: HTTP ${r.status}`);
-  const html = await r.text();
-  const results = [];
-  const linkRe = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
-  const snipRe = /<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
-  let m;
-  const links = [];
-  while ((m = linkRe.exec(html)) && links.length < 6) {
-    let url = m[1];
-    const uddg = url.match(/[?&]uddg=([^&]+)/);
-    if (uddg) url = decodeURIComponent(uddg[1]);
-    links.push({ url, title: htmlToText(m[2]) });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return await r.text();
+}
+
+function decodeDdgHref(url) {
+  const uddg = url.match(/[?&]uddg=([^&]+)/);
+  return uddg ? decodeURIComponent(uddg[1]) : url;
+}
+
+async function searchDdgHtml(query) {
+  const html = await engineFetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`);
+  const links = [...html.matchAll(/<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)]
+    .map((m) => ({ url: decodeDdgHref(m[1]), title: htmlToText(m[2]) }));
+  const snips = [...html.matchAll(/<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g)].map((m) => htmlToText(m[1]));
+  return links.slice(0, 6).map((l, i) => `${i + 1}. ${l.title}\n   ${l.url}\n   ${snips[i] || ''}`);
+}
+
+// Bing wraps result links in a redirect: /ck/a?...&u=a1<url-safe base64>.
+function decodeBingHref(url) {
+  url = decodeEntities(url);
+  const m = url.match(/[?&]u=a1([^&]+)/);
+  if (m) {
+    try {
+      let b64 = m[1].replace(/-/g, '+').replace(/_/g, '/');
+      while (b64.length % 4) b64 += '=';
+      const decoded = Buffer.from(b64, 'base64').toString('utf8');
+      if (/^https?:\/\//.test(decoded)) return decoded;
+    } catch { /* keep redirect url */ }
   }
-  const snips = [];
-  while ((m = snipRe.exec(html)) && snips.length < 6) snips.push(htmlToText(m[1]));
-  links.forEach((l, i) => results.push(`${i + 1}. ${l.title}\n   ${l.url}\n   ${snips[i] || ''}`));
-  if (!results.length) return 'No results (the search page may have changed or the network is down).';
-  return results.join('\n\n');
+  return url;
+}
+
+async function searchBing(query) {
+  const html = await engineFetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}&count=8`);
+  const blocks = html.split(/<li class="b_algo"/).slice(1, 7);
+  return blocks
+    .map((b, i) => {
+      const a = b.match(/<h2[^>]*><a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+      if (!a) return null;
+      const p = b.match(/<p[^>]*>([\s\S]*?)<\/p>/);
+      return `${i + 1}. ${htmlToText(a[2])}\n   ${decodeBingHref(a[1])}\n   ${p ? htmlToText(p[1]).slice(0, 300) : ''}`;
+    })
+    .filter(Boolean);
+}
+
+// Engines in preference order, each tried twice with backoff. A transient
+// ECONNRESET from one engine should never reach the model as a failure.
+// (DuckDuckGo Lite is deliberately absent — it bot-walls non-browser clients.)
+async function webSearch(query) {
+  const engines = [searchDdgHtml, searchBing];
+  const errors = [];
+  for (const engine of engines) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const results = await engine(query);
+        if (results.length) return results.join('\n\n');
+        errors.push(`${engine.name}: no results parsed`);
+        break; // parsed fine but empty — try next engine, not same one again
+      } catch (err) {
+        errors.push(`${engine.name}: ${errCode(err)}`);
+        await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
+      }
+    }
+  }
+  console.warn('web_search exhausted:', errors.join(' | '));
+  return `Search is unreachable right now (${errors.slice(-2).join('; ')}). Tell the user rather than guessing.`;
 }
 
 async function fetchUrl(raw) {
   const u = assertPublicHttpUrl(raw);
-  const r = await fetch(u, {
-    headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html,text/plain,application/json;q=0.9,*/*;q=0.5' },
-    signal: AbortSignal.timeout(20000),
-    redirect: 'follow',
-  });
+  let r, lastErr;
+  for (let attempt = 0; attempt < 3 && !r; attempt++) {
+    try {
+      r = await fetch(u, {
+        headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html,text/plain,application/json;q=0.9,*/*;q=0.5' },
+        signal: AbortSignal.timeout(20000),
+        redirect: 'follow',
+      });
+    } catch (err) {
+      lastErr = err;
+      await new Promise((res) => setTimeout(res, 400 * (attempt + 1)));
+    }
+  }
+  if (!r) throw new Error(`could not reach ${u.hostname}: ${errCode(lastErr)}`);
   const type = r.headers.get('content-type') || '';
   if (!/text\/|json|xml/.test(type)) throw new Error(`unsupported content-type: ${type}`);
   let body = await r.text();
@@ -412,6 +477,19 @@ async function fetchUrl(raw) {
   const out = text.slice(0, 10_000);
   return `[${r.status}] ${u.href}\n\n${out}${text.length > 10_000 ? '\n… [truncated]' : ''}`;
 }
+
+// Direct search access for diagnostics (and future UI use): /api/search?q=…
+app.get('/api/search', async (req, res) => {
+  try {
+    const q = String(req.query.q || '');
+    if (!q) throw new Error('missing q');
+    const engine = { html: searchDdgHtml, bing: searchBing }[req.query.engine];
+    const results = engine ? (await engine(q)).join('\n\n') : await webSearch(q);
+    res.type('text/plain').send(results);
+  } catch (err) {
+    sendErr(res, err, 502);
+  }
+});
 
 // ---------- agent tools ----------
 

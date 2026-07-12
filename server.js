@@ -320,10 +320,18 @@ const WEB_TOOL_DEFS = [
     function: {
       name: 'web_search',
       description:
-        'Search the live web (DuckDuckGo). Use for anything time-sensitive or uncertain: schedules, news, prices, versions, docs. Returns titles, URLs, and snippets.',
+        'Search the live web. Use for anything time-sensitive or uncertain: schedules, news, prices, versions, docs. ' +
+        'Write SHORT keyword queries (3-7 words, no quote marks). Returns titles, URLs, and snippets.',
       parameters: {
         type: 'object',
-        properties: { query: { type: 'string', description: 'The search query' } },
+        properties: {
+          query: { type: 'string', description: 'Short keyword query, e.g. "England Norway kickoff time"' },
+          freshness: {
+            type: 'string',
+            enum: ['day', 'week', 'month'],
+            description: "Restrict results by age. Use 'day' for today's events, schedules, scores; 'week' for recent news.",
+          },
+        },
         required: ['query'],
       },
     },
@@ -394,11 +402,36 @@ function decodeDdgHref(url) {
   return uddg ? decodeURIComponent(uddg[1]) : url;
 }
 
-async function searchDdgHtml(query) {
-  const html = await engineFetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`);
+// Long quoted queries make scraped engines return keyword soup — keep it short and bare.
+function sanitizeQuery(q) {
+  return String(q).replace(/["'“”‘’]/g, ' ').replace(/\s+/g, ' ').trim().split(' ').slice(0, 10).join(' ');
+}
+
+function assertNotChallenged(html) {
+  if (/anomaly|challenge-form|captcha|unusual traffic|verify you are human/i.test(html)) {
+    throw new Error('engine bot-challenged us');
+  }
+}
+
+const FRESH_DDG = { day: 'd', week: 'w', month: 'm' };
+const FRESH_BING = { day: 'ez1', week: 'ez2', month: 'ez3' };
+
+async function searchDdgHtml(query, freshness) {
+  const df = FRESH_DDG[freshness] ? `&df=${FRESH_DDG[freshness]}` : '';
+  const html = await engineFetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}${df}`);
+  assertNotChallenged(html);
   const links = [...html.matchAll(/<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)]
     .map((m) => ({ url: decodeDdgHref(m[1]), title: htmlToText(m[2]) }));
   const snips = [...html.matchAll(/<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g)].map((m) => htmlToText(m[1]));
+  return links.slice(0, 6).map((l, i) => `${i + 1}. ${l.title}\n   ${l.url}\n   ${snips[i] || ''}`);
+}
+
+async function searchMojeek(query) {
+  const html = await engineFetch(`https://www.mojeek.com/search?q=${encodeURIComponent(query)}`);
+  assertNotChallenged(html);
+  const links = [...html.matchAll(/<h2><a[^>]*class="title"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)]
+    .map((m) => ({ url: m[1], title: htmlToText(m[2]) }));
+  const snips = [...html.matchAll(/<p class="s">([\s\S]*?)<\/p>/g)].map((m) => htmlToText(m[1]));
   return links.slice(0, 6).map((l, i) => `${i + 1}. ${l.title}\n   ${l.url}\n   ${snips[i] || ''}`);
 }
 
@@ -417,8 +450,10 @@ function decodeBingHref(url) {
   return url;
 }
 
-async function searchBing(query) {
-  const html = await engineFetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}&count=8`);
+async function searchBing(query, freshness) {
+  const fr = FRESH_BING[freshness] ? `&filters=ex1%3a%22${FRESH_BING[freshness]}%22` : '';
+  const html = await engineFetch(`https://www.bing.com/search?q=${encodeURIComponent(query)}&count=8${fr}`);
+  assertNotChallenged(html);
   const blocks = html.split(/<li class="b_algo"/).slice(1, 7);
   return blocks
     .map((b, i) => {
@@ -430,27 +465,29 @@ async function searchBing(query) {
     .filter(Boolean);
 }
 
-// Engines in preference order, each tried twice with backoff. A transient
-// ECONNRESET from one engine should never reach the model as a failure.
-// (DuckDuckGo Lite is deliberately absent — it bot-walls non-browser clients.)
-async function webSearch(query) {
-  const engines = [searchDdgHtml, searchBing];
+// Three independent engines in preference order, each tried twice with
+// backoff — but a bot-challenge skips straight to the next engine (retrying
+// a challenge just digs the hole deeper).
+async function webSearch(query, freshness) {
+  const q = sanitizeQuery(query);
+  const engines = [searchDdgHtml, searchBing, searchMojeek];
   const errors = [];
   for (const engine of engines) {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const results = await engine(query);
+        const results = await engine(q, freshness);
         if (results.length) return results.join('\n\n');
         errors.push(`${engine.name}: no results parsed`);
         break; // parsed fine but empty — try next engine, not same one again
       } catch (err) {
         errors.push(`${engine.name}: ${errCode(err)}`);
+        if (/challenged/.test(err.message)) break;
         await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
       }
     }
   }
   console.warn('web_search exhausted:', errors.join(' | '));
-  return `Search is unreachable right now (${errors.slice(-2).join('; ')}). Tell the user rather than guessing.`;
+  return `Search is unreachable right now (${errors.slice(-3).join('; ')}). Tell the user rather than guessing.`;
 }
 
 async function fetchUrl(raw) {
@@ -483,8 +520,8 @@ app.get('/api/search', async (req, res) => {
   try {
     const q = String(req.query.q || '');
     if (!q) throw new Error('missing q');
-    const engine = { html: searchDdgHtml, bing: searchBing }[req.query.engine];
-    const results = engine ? (await engine(q)).join('\n\n') : await webSearch(q);
+    const engine = { html: searchDdgHtml, bing: searchBing, mojeek: searchMojeek }[req.query.engine];
+    const results = engine ? (await engine(q, req.query.freshness)).join('\n\n') : await webSearch(q, req.query.freshness);
     res.type('text/plain').send(results);
   } catch (err) {
     sendErr(res, err, 502);
@@ -551,7 +588,7 @@ const TOOL_DEFS = [
 async function runTool(name, args, workspace) {
   switch (name) {
     case 'web_search':
-      return await webSearch(String(args.query || ''));
+      return await webSearch(String(args.query || ''), args.freshness);
     case 'fetch_url':
       return await fetchUrl(String(args.url || ''));
     case 'read_file': {
@@ -747,9 +784,17 @@ app.post('/api/chat', async (req, res) => {
     const isDs4 = model.startsWith(DS4_PREFIX);
     const convo = [...messages];
     // Web tools ride along on every request; file/shell tools only in agent mode.
-    const tools = [...WEB_TOOL_DEFS, ...(agent && workspace ? TOOL_DEFS : [])];
+    const allTools = [...WEB_TOOL_DEFS, ...(agent && workspace ? TOOL_DEFS : [])];
+    // Loop guards: dedupe repeated searches, and past the budget stop offering
+    // tools entirely so the model must answer with what it has.
+    const searchesSeen = new Set();
+    const fetchesSeen = new Set();
+    const MAX_SEARCHES = 5;
+    const TOOL_ROUNDS = agent && workspace ? 24 : 8;
+    const normQuery = (q) => sanitizeQuery(q).toLowerCase().split(' ').sort().join(' ');
 
     for (let round = 0; round < 25; round++) {
+      const tools = round < TOOL_ROUNDS ? allTools : undefined;
       const msg = isDs4
         ? await ds4Round({ messages: convo, think, tools }, emit, abort.signal)
         : await ollamaRound(
@@ -774,7 +819,24 @@ app.post('/api/chat', async (req, res) => {
         emit({ type: 'tool_call', name, args });
         let result;
         try {
-          result = await runTool(name, args || {}, workspace);
+          if (name === 'web_search') {
+            const norm = normQuery(args?.query || '');
+            if (searchesSeen.has(norm)) {
+              result = 'DUPLICATE SEARCH — you already ran an equivalent query in this turn and the results will not change. ' +
+                'Do NOT search again. Answer from the results you already have, or if the question is ambiguous, ask the user to clarify.';
+            } else if (searchesSeen.size >= MAX_SEARCHES) {
+              result = `SEARCH LIMIT REACHED (${MAX_SEARCHES} searches this turn). Do NOT search again. ` +
+                'Answer from what you have, state what you could not confirm, or ask the user to clarify.';
+            } else {
+              searchesSeen.add(norm);
+              result = await runTool(name, args || {}, workspace);
+            }
+          } else if (name === 'fetch_url' && fetchesSeen.has(String(args?.url || '').trim())) {
+            result = 'DUPLICATE FETCH — you already fetched this exact URL this turn. Reuse that content instead of fetching again.';
+          } else {
+            if (name === 'fetch_url') fetchesSeen.add(String(args?.url || '').trim());
+            result = await runTool(name, args || {}, workspace);
+          }
         } catch (err) {
           result = `ERROR: ${err.message}`;
         }

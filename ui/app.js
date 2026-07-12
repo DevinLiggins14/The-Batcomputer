@@ -385,7 +385,12 @@ function systemPrompt() {
   let p = `You are the assistant in The Batcomputer, a local-LLM IDE on the user's Mac. Current local date and time: ${now}.`;
   if (state.workspace) p += ` The current workspace folder is ${state.workspace}.`;
   p += ' You always have web_search and fetch_url tools — use them (do not guess) for anything time-sensitive ' +
-    'or uncertain: schedules, live events, news, prices, versions, documentation. Search first, then fetch a promising result if needed.';
+    'or uncertain: schedules, live events, news, prices, versions, documentation. ' +
+    'Search rules: SHORT keyword queries (3-7 words, never use quote marks), set freshness="day" for today\'s ' +
+    'events/schedules/scores. At most 2-3 searches per question — never rephrase the same failed search; ' +
+    'if results do not answer the question, say what you could not confirm. If the question itself is ambiguous ' +
+    'or contains a possible typo, ask the user a brief clarifying question INSTEAD of searching repeatedly. ' +
+    'Simple timezone math (ET to CT is minus 1 hour) needs no search.';
   if (agentOn) {
     p += ' Agent mode is ON: you also have read_file, write_file, list_directory, and run_command tools scoped to the workspace. ' +
       'Use them proactively to complete tasks. Paths are relative to the workspace root. ' +

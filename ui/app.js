@@ -679,7 +679,9 @@ function updateWsLabel() {
 function updateModelLabel() {
   const label = state.model.startsWith('ds4:')
     ? state.model.slice(4) + ' · local'
-    : state.model;
+    : state.model.startsWith('lms:')
+      ? state.model.slice(4) + ' · lm studio'
+      : state.model;
   $('#chat-model-label').textContent = label.toUpperCase();
 }
 

@@ -27,6 +27,12 @@ const DS4_PREFIX = 'ds4:';
 const DEFAULT_MODEL = DS4_PREFIX + 'deepseek-v4-flash';
 // DeepSeek's recommended sampling — pinned so no client default drifts.
 const SAMPLING = { temperature: 1.0, top_p: 1.0 };
+// LM Studio — OpenAI-compatible local server (MLX engine), e.g. Qwen3.6 NVFP4.
+const LMS = { url: process.env.LMSTUDIO_URL || 'http://127.0.0.1:1234' };
+const LMS_PREFIX = 'lms:';
+// Qwen3.6's recommended thinking-mode sampling. LM Studio's API has no
+// thinking toggle (the chat template's default — on — always applies).
+const LMS_SAMPLING = { temperature: 1.0, top_p: 0.95 };
 
 let ds4Spawned = false;
 async function ds4Alive() {
@@ -154,6 +160,14 @@ app.get('/api/models', async (req, res) => {
     const data = await r.json();
     for (const m of data.models || []) models.push(m.name);
   } catch { /* Ollama not running — ds4 alone is fine */ }
+  try {
+    const r = await fetch(`${LMS.url}/v1/models`, { signal: AbortSignal.timeout(1500) });
+    const data = await r.json();
+    for (const m of data.data || []) {
+      if (/embed/i.test(m.id)) continue; // embedding models can't chat
+      models.push(LMS_PREFIX + m.id);
+    }
+  } catch { /* LM Studio not running — fine */ }
   res.json({ models, ds4: ds4Status });
 });
 
@@ -701,28 +715,17 @@ async function ollamaRound(payload, emit, signal) {
   return msg;
 }
 
-// One ds4-server (OpenAI-compatible) round over SSE. Streams tokens/thinking
-// to `emit`, returns the final assistant message with OpenAI-format tool calls.
-async function ds4Round(payload, emit, signal) {
-  const body = {
-    model: 'deepseek-v4-flash',
-    messages: payload.messages,
-    stream: true,
-    stream_options: { include_usage: true },
-    ...SAMPLING, // ignored by the server in thinking mode, applied in non-think
-  };
-  // Server default is high-effort thinking; map the UI's three modes.
-  if (payload.think === false || payload.think === undefined) body.think = false;
-  else if (payload.think === 'max') body.reasoning_effort = 'max';
-  if (payload.tools) body.tools = payload.tools;
-
-  const r = await fetch(`${DS4.url}/v1/chat/completions`, {
+// One OpenAI-compatible /v1/chat/completions round over SSE (ds4-server and
+// LM Studio both speak this). Streams tokens/thinking to `emit`, returns the
+// final assistant message with OpenAI-format tool calls.
+async function openAiRound(base, label, body, emit, signal) {
+  const r = await fetch(`${base}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
     signal,
   });
-  if (!r.ok) throw new Error(`ds4-server error ${r.status}: ${(await r.text()).slice(0, 400)}`);
+  if (!r.ok) throw new Error(`${label} error ${r.status}: ${(await r.text()).slice(0, 400)}`);
 
   const msg = { role: 'assistant', content: '', thinking: '', tool_calls: [] };
   const started = Date.now();
@@ -767,6 +770,33 @@ async function ds4Round(payload, emit, signal) {
   return msg;
 }
 
+async function ds4Round(payload, emit, signal) {
+  const body = {
+    model: 'deepseek-v4-flash',
+    messages: payload.messages,
+    stream: true,
+    stream_options: { include_usage: true },
+    ...SAMPLING, // ignored by the server in thinking mode, applied in non-think
+  };
+  // Server default is high-effort thinking; map the UI's three modes.
+  if (payload.think === false || payload.think === undefined) body.think = false;
+  else if (payload.think === 'max') body.reasoning_effort = 'max';
+  if (payload.tools) body.tools = payload.tools;
+  return openAiRound(DS4.url, 'ds4-server', body, emit, signal);
+}
+
+async function lmsRound(payload, emit, signal) {
+  const body = {
+    model: payload.model,
+    messages: payload.messages,
+    stream: true,
+    stream_options: { include_usage: true },
+    ...LMS_SAMPLING,
+  };
+  if (payload.tools) body.tools = payload.tools;
+  return openAiRound(LMS.url, 'LM Studio', body, emit, signal);
+}
+
 app.post('/api/chat', async (req, res) => {
   const { messages, model = DEFAULT_MODEL, think = false, agent = false, workspace } = req.body;
   res.setHeader('Content-Type', 'application/x-ndjson');
@@ -782,6 +812,8 @@ app.post('/api/chat', async (req, res) => {
 
   try {
     const isDs4 = model.startsWith(DS4_PREFIX);
+    const isLms = model.startsWith(LMS_PREFIX);
+    const openAiHistory = isDs4 || isLms; // both keep OpenAI-format tool history
     const convo = [...messages];
     // Web tools ride along on every request; file/shell tools only in agent mode.
     const allTools = [...WEB_TOOL_DEFS, ...(agent && workspace ? TOOL_DEFS : [])];
@@ -797,13 +829,15 @@ app.post('/api/chat', async (req, res) => {
       const tools = round < TOOL_ROUNDS ? allTools : undefined;
       const msg = isDs4
         ? await ds4Round({ messages: convo, think, tools }, emit, abort.signal)
-        : await ollamaRound(
-            { model, stream: true, options: { ...SAMPLING }, think, tools, messages: convo },
-            emit, abort.signal
-          );
+        : isLms
+          ? await lmsRound({ model: model.slice(LMS_PREFIX.length), messages: convo, tools }, emit, abort.signal)
+          : await ollamaRound(
+              { model, stream: true, options: { ...SAMPLING }, think, tools, messages: convo },
+              emit, abort.signal
+            );
       if (!msg.tool_calls.length) break;
 
-      if (isDs4) {
+      if (openAiHistory) {
         // OpenAI-format history; keep the server-issued ids so ds4's exact
         // DSML replay can reuse its KV cache.
         convo.push({ role: 'assistant', content: msg.content || null, tool_calls: msg.tool_calls });
@@ -842,7 +876,7 @@ app.post('/api/chat', async (req, res) => {
         }
         const preview = result.length > 1500 ? result.slice(0, 1500) + `\n… [${result.length} chars total]` : result;
         emit({ type: 'tool_result', name, result: preview });
-        if (isDs4) convo.push({ role: 'tool', tool_call_id: tc.id, content: String(result) });
+        if (openAiHistory) convo.push({ role: 'tool', tool_call_id: tc.id, content: String(result) });
         else convo.push({ role: 'tool', tool_name: name, name, content: String(result) });
       }
     }

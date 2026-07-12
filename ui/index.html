@@ -25,7 +25,7 @@
     <label class="toggle" title="Let the model read/write files and run commands in the workspace">
       <input type="checkbox" id="agent-toggle" /> Agent
     </label>
-    <button id="ds4-config" title="Configure how ds4-server runs (context size, power, flags)">DS4 Config</button>
+    <button id="ds4-config" title="Configure the local DeepSeek engine (ds4-server): context size, power, flags. Ollama models are managed by Ollama itself.">Model Config</button>
   </div>
 
   <div id="main">
@@ -86,7 +86,7 @@
 
   <div id="ds4-modal" class="hidden">
     <div id="ds4-panel">
-      <div class="panel-title">DS4 LAUNCH CONFIGURATION</div>
+      <div class="panel-title">MODEL SERVER CONFIGURATION — DS4</div>
       <div id="ds4-status-line" class="mono">querying server…</div>
       <label class="field">Preset
         <select id="ds4-preset">

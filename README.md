@@ -87,7 +87,7 @@ Every conversation is stored on disk as soon as the model replies. The <b>Chats<
 
 <img src="docs/images/ds4-config.png"/>
 
-<br/> The <b>DS4 Config</b> panel controls the launch configuration of the inference server itself — the same knobs as running <code>ds4-agent</code> by hand in a terminal. Pick a preset (for example Think Max with a 500,000-token context, the equivalent of <code>./ds4-agent --think-max --ctx 500000</code>), or set a custom context size, GPU power duty cycle, and any extra <code>ds4-server</code> flags. The panel shows the exact launch command and the live status of the current server: pid, context size, and whether Think Max is available. <br/>
+<br/> The <b>Model Config</b> panel controls the launch configuration of the DeepSeek inference server (ds4-server) itself — the same knobs as running <code>ds4-agent</code> by hand in a terminal. Pick a preset (for example Think Max with a 500,000-token context, the equivalent of <code>./ds4-agent --think-max --ctx 500000</code>), or set a custom context size, GPU power duty cycle, and any extra <code>ds4-server</code> flags. The panel shows the exact launch command and the live status of the current server: pid, context size, and whether Think Max is available. <br/>
 <br/> <b>Apply &amp; Restart</b> kills the running ds4-server and relaunches it detached with the chosen flags; the SYSTEM readout in the sidebar tracks it through <code>LOADING MODEL…</code> back to <code>ONLINE</code>, along with live CPU, GPU, and RAM usage (CPU from kernel tick counters, GPU from the IOAccelerator utilization counters, RAM from <code>vm_stat</code> — the same sources Activity Monitor reads). <br/>
 
 ## Step 5: Configuration

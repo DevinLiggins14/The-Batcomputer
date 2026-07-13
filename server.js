@@ -30,6 +30,11 @@ const SAMPLING = { temperature: 1.0, top_p: 1.0 };
 // LM Studio — OpenAI-compatible local server (MLX engine), e.g. Qwen3.6 NVFP4.
 const LMS = { url: process.env.LMSTUDIO_URL || 'http://127.0.0.1:1234' };
 const LMS_PREFIX = 'lms:';
+// Hermes Agent — Nous Research's agent CLI (own tools/memory/skills), driven
+// through one-shot `hermes -z` runs. It uses whatever model its own config
+// points at (currently the LM Studio Qwen), so it needs LM Studio up too.
+const HERMES = { bin: process.env.HERMES_BIN || `${os.homedir()}/.local/bin/hermes` };
+const HERMES_PREFIX = 'hermes:';
 // Qwen3.6's recommended thinking-mode sampling. LM Studio's API has no
 // thinking toggle (the chat template's default — on — always applies).
 const LMS_SAMPLING = { temperature: 1.0, top_p: 0.95 };
@@ -179,6 +184,7 @@ app.get('/api/models', async (req, res) => {
       models.push(LMS_PREFIX + m.id);
     }
   } catch { /* LM Studio not running — fine */ }
+  if (fsSync.existsSync(HERMES.bin)) models.push(HERMES_PREFIX + 'agent');
   res.json({ models, ds4: ds4Status });
 });
 
@@ -191,6 +197,22 @@ app.get('/api/engine/status', async (req, res) => {
     const ctx = ctxMatch ? parseInt(ctxMatch[1], 10) : null;
     return res.json({ engine: 'DS4', alive, loading: !!proc && !alive, ctx, thinkMaxCapable: ctx !== null && ctx >= 393216 });
   }
+  if (model.startsWith(LMS_PREFIX)) {
+    try {
+      const r = await fetch(`${LMS.url}/v1/models`, { signal: AbortSignal.timeout(1500) });
+      const d = await r.json();
+      const listed = (d.data || []).some((m) => m.id === model.slice(LMS_PREFIX.length));
+      return res.json({ engine: 'LM STUDIO', alive: listed, loading: false, loaded: listed, reason: listed ? '' : 'model not loaded in LM Studio' });
+    } catch {
+      return res.json({ engine: 'LM STUDIO', alive: false, loading: false, loaded: false, reason: 'LM Studio server not running' });
+    }
+  }
+  if (model.startsWith(HERMES_PREFIX)) {
+    const binOk = fsSync.existsSync(HERMES.bin);
+    let lmsUp = false;
+    try { lmsUp = (await fetch(`${LMS.url}/v1/models`, { signal: AbortSignal.timeout(1500) })).ok; } catch { /* down */ }
+    return res.json({ engine: 'HERMES', alive: binOk && lmsUp, loading: false, loaded: binOk && lmsUp, reason: binOk ? (lmsUp ? '' : 'needs LM Studio running') : 'hermes binary missing' });
+  }
   try {
     const [tagsR, psR] = await Promise.all([
       fetch(`${OLLAMA}/api/tags`, { signal: AbortSignal.timeout(1500) }),
@@ -198,14 +220,16 @@ app.get('/api/engine/status', async (req, res) => {
     ]);
     const tags = await tagsR.json();
     const ps = await psR.json();
+    const installed = (tags.models || []).some((m) => m.name === model);
     res.json({
       engine: 'OLLAMA',
-      alive: (tags.models || []).some((m) => m.name === model),
+      alive: installed,
       loading: false,
       loaded: (ps.models || []).some((m) => m.name === model),
+      reason: installed ? '' : 'model not installed in Ollama',
     });
   } catch {
-    res.json({ engine: 'OLLAMA', alive: false, loading: false, loaded: false });
+    res.json({ engine: 'OLLAMA', alive: false, loading: false, loaded: false, reason: 'Ollama daemon not running' });
   }
 });
 
@@ -637,18 +661,28 @@ const TOOL_DEFS = [
   },
 ];
 
+function requireArg(args, key, { allowEmpty = false } = {}) {
+  const v = args?.[key];
+  if (typeof v !== 'string' || (!allowEmpty && !v.trim())) {
+    const got = Object.keys(args || {}).join(', ') || 'none';
+    throw new Error(`missing required parameter "${key}" (got parameters: ${got}) — retry with the correct parameter name`);
+  }
+  return v;
+}
+
 async function runTool(name, args, workspace) {
   switch (name) {
     case 'web_search':
-      return await webSearch(String(args.query || ''), args.freshness);
+      return await webSearch(requireArg(args, 'query'), args.freshness);
     case 'fetch_url':
-      return await fetchUrl(String(args.url || ''));
+      return await fetchUrl(requireArg(args, 'url'));
     case 'read_file': {
-      const abs = safeResolve(workspace, args.path);
+      const abs = safeResolve(workspace, requireArg(args, 'path'));
       return await fs.readFile(abs, 'utf8');
     }
     case 'write_file': {
-      const abs = safeResolve(workspace, args.path);
+      const abs = safeResolve(workspace, requireArg(args, 'path'));
+      requireArg(args, 'content', { allowEmpty: true });
       await fs.mkdir(path.dirname(abs), { recursive: true });
       await fs.writeFile(abs, args.content, 'utf8');
       return `wrote ${args.content.length} chars to ${args.path}`;
@@ -662,6 +696,7 @@ async function runTool(name, args, workspace) {
         .join('\n');
     }
     case 'run_command': {
+      requireArg(args, 'command');
       return await new Promise((resolve) => {
         execFile(
           '/bin/zsh',
@@ -835,6 +870,44 @@ async function lmsRound(payload, emit, signal) {
   return openAiRound(LMS.url, 'LM Studio', body, emit, signal);
 }
 
+// Hermes runs one agent turn per `-z` invocation and only prints the final
+// answer, so prior turns are inlined into the prompt to keep the chat coherent
+// (Hermes named sessions don't carry -z context across runs).
+function hermesPrompt(messages) {
+  const last = messages[messages.length - 1]?.content || '';
+  const hist = messages.slice(0, -1).filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content);
+  if (!hist.length) return last;
+  const lines = hist.map((m) => `${m.role === 'user' ? 'User' : 'You'}: ${m.content}`);
+  return `Conversation so far:\n${lines.join('\n\n')}\n\nUser's new message (respond to this one):\n${last}`;
+}
+
+// --yolo mirrors the IDE's own agent mode, where tools run without per-call
+// approval. stdout in non-TTY mode is the final answer only — no streaming.
+function hermesRound(messages, workspace, emit, signal) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(HERMES.bin, ['--yolo', '-z', hermesPrompt(messages)], {
+      cwd: workspace || os.homedir(),
+      env: { ...process.env, NO_COLOR: '1' },
+    });
+    emit({ type: 'thinking', content: '[hermes agent is working — tools may run before the answer appears]\n' });
+    let out = '';
+    let err = '';
+    const onAbort = () => child.kill('SIGTERM');
+    signal.addEventListener('abort', onAbort, { once: true });
+    child.stdout.on('data', (d) => { out += d.toString(); });
+    child.stderr.on('data', (d) => { err += d.toString(); });
+    child.on('error', (e) => reject(new Error(`hermes failed to start: ${e.message}`)));
+    child.on('close', (code) => {
+      signal.removeEventListener('abort', onAbort);
+      if (signal.aborted) return resolve('');
+      const clean = out.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').trim();
+      if (!clean && code !== 0) return reject(new Error(`hermes exited ${code}: ${err.trim().slice(0, 300)}`));
+      emit({ type: 'token', content: clean || '[hermes returned no output]' });
+      resolve(clean);
+    });
+  });
+}
+
 app.post('/api/chat', async (req, res) => {
   const { messages, model = DEFAULT_MODEL, think = false, agent = false, workspace } = req.body;
   res.setHeader('Content-Type', 'application/x-ndjson');
@@ -849,6 +922,13 @@ app.post('/api/chat', async (req, res) => {
   });
 
   try {
+    // Hermes is a whole agent, not a model: hand it the conversation and let
+    // it run its own tool loop; the IDE's tools stay out of the way.
+    if (model.startsWith(HERMES_PREFIX)) {
+      await hermesRound(messages, workspace, emit, abort.signal);
+      emit({ type: 'done' });
+      return;
+    }
     const isDs4 = model.startsWith(DS4_PREFIX);
     const isLms = model.startsWith(LMS_PREFIX);
     const openAiHistory = isDs4 || isLms; // both keep OpenAI-format tool history
@@ -865,6 +945,7 @@ app.post('/api/chat', async (req, res) => {
 
     for (let round = 0; round < 25; round++) {
       const tools = round < TOOL_ROUNDS ? allTools : undefined;
+      const offered = new Set((tools || []).map((t) => t.function.name));
       const msg = isDs4
         ? await ds4Round({ messages: convo, think, tools }, emit, abort.signal)
         : isLms
@@ -891,7 +972,12 @@ app.post('/api/chat', async (req, res) => {
         emit({ type: 'tool_call', name, args });
         let result;
         try {
-          if (name === 'web_search') {
+          if (!offered.has(name)) {
+            result = TOOL_DEFS.some((t) => t.function.name === name)
+              ? `ERROR: "${name}" is not available right now — file and shell tools require Agent mode ON and a workspace folder open. ` +
+                'Tell the user to click Open Folder (and enable the Agent toggle), then try again. Do not retry until they have.'
+              : `ERROR: "${name}" is not a tool that exists here. Available tools: ${[...offered].join(', ') || 'none this round'}.`;
+          } else if (name === 'web_search') {
             const norm = normQuery(args?.query || '');
             if (searchesSeen.has(norm)) {
               result = 'DUPLICATE SEARCH — you already ran an equivalent query in this turn and the results will not change. ' +

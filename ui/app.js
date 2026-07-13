@@ -391,10 +391,13 @@ function systemPrompt() {
     'if results do not answer the question, say what you could not confirm. If the question itself is ambiguous ' +
     'or contains a possible typo, ask the user a brief clarifying question INSTEAD of searching repeatedly. ' +
     'Simple timezone math (ET to CT is minus 1 hour) needs no search.';
-  if (agentOn) {
+  if (agentOn && state.workspace) {
     p += ' Agent mode is ON: you also have read_file, write_file, list_directory, and run_command tools scoped to the workspace. ' +
       'Use them proactively to complete tasks. Paths are relative to the workspace root. ' +
       'After changing files, briefly summarize what you changed.';
+  } else if (agentOn) {
+    p += ' The Agent toggle is on but NO folder is open, so file and shell tools are NOT available and calls to them ' +
+      'will fail. Tell the user to click Open Folder to pick a workspace first; do not attempt file or shell tools until then.';
   } else {
     p += ' Agent mode is OFF: you have NO file or shell access — never claim to run commands or read files; ' +
       'ask the user to enable Agent mode if a task needs it. When suggesting code changes, use fenced code blocks.';
@@ -681,7 +684,9 @@ function updateModelLabel() {
     ? state.model.slice(4) + ' · local'
     : state.model.startsWith('lms:')
       ? state.model.slice(4) + ' · lm studio'
-      : state.model;
+      : state.model.startsWith('hermes:')
+        ? 'hermes agent · local'
+        : state.model;
   $('#chat-model-label').textContent = label.toUpperCase();
 }
 
@@ -780,6 +785,8 @@ async function pollSystem() {
       if (st.engine === 'DS4') {
         const ktok = st.ctx ? Math.round(st.ctx / 1000) + 'K' : '?';
         el.textContent = `ONLINE · CTX ${ktok}${st.thinkMaxCapable ? ' · TMAX' : ''}`;
+      } else if (st.engine === 'HERMES') {
+        el.textContent = 'READY';
       } else {
         el.textContent = st.loaded ? 'ONLINE · IN MEMORY' : 'ONLINE · IDLE';
       }
@@ -787,7 +794,8 @@ async function pollSystem() {
       el.textContent = 'LOADING MODEL…';
       el.classList.add('loading');
     } else {
-      el.textContent = 'OFFLINE';
+      el.textContent = (st.reason && /not installed|not loaded/.test(st.reason)) ? 'NOT LOADED' : 'OFFLINE';
+      el.title = st.reason || '';
       el.classList.add('offline');
     }
   } catch { /* ignore */ }

@@ -8,8 +8,8 @@
 }
 :root {
   --bg: #010409;
-  --bg-panel: #0d1117;
-  --bg-elevated: #161b22;
+  --bg-panel: #04070c;
+  --bg-elevated: #0d1117;
   --bg-inset: #000000;
   --border: #21262d;
   --border-bright: #30363d;
@@ -60,7 +60,7 @@ select:focus, textarea:focus, input:focus { outline: none; border-color: var(--a
 /* ---------- top bar ---------- */
 #topbar {
   display: flex; align-items: center; gap: 12px; padding: 7px 12px;
-  background: linear-gradient(180deg, #070b0f 0%, var(--bg-panel) 100%);
+  background: linear-gradient(180deg, #060a10 0%, var(--bg-panel) 100%);
   border-bottom: 1px solid var(--border-bright); flex-shrink: 0; position: relative;
 }
 #topbar::after {
@@ -107,7 +107,7 @@ select:focus, textarea:focus, input:focus { outline: none; border-color: var(--a
 /* system HUD */
 #system-hud {
   border-top: 1px solid var(--border-bright); padding: 8px 12px 10px; flex-shrink: 0;
-  background: linear-gradient(180deg, var(--bg-panel) 0%, #060a0e 100%);
+  background: linear-gradient(180deg, var(--bg-panel) 0%, #02040a 100%);
 }
 .hud-title { font-family: var(--mono); font-size: 10px; letter-spacing: 3px; color: var(--fg-dim); margin-bottom: 7px; }
 .hud-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }

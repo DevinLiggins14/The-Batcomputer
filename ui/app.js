@@ -139,6 +139,7 @@ async function openFile(relPath) {
 }
 
 function activateTab(relPath) {
+  if (!$('#diff-view').classList.contains('hidden')) closeDiff();
   const prev = state.tabs.find((t) => t.path === state.activePath);
   if (prev && editor.getModel() === prev.model) prev.viewState = editor.saveViewState();
   const tab = state.tabs.find((t) => t.path === relPath);
@@ -205,6 +206,7 @@ async function saveActiveFile() {
     tab.dirty = false;
     renderTabs();
     setStatus(`saved ${tab.path}`);
+    refreshScm();
   } catch (err) {
     setStatus(`save failed: ${err.message}`);
   }
@@ -494,7 +496,7 @@ async function sendChat() {
     if (assistantText) state.chat.push({ role: 'assistant', content: assistantText });
     saveSession();
     for (const p of touchedFiles) refreshOpenFile(p);
-    if (touchedFiles.size) loadTree();
+    if (touchedFiles.size) { loadTree(); refreshScm(); }
   }
 }
 
@@ -667,7 +669,9 @@ async function pickWorkspace() {
   $('#editor-empty').style.display = 'flex';
   renderTabs();
   updateWsLabel();
+  closeDiff();
   await loadTree();
+  refreshScm();
 }
 
 function updateWsLabel() {
@@ -754,6 +758,130 @@ function wireDropZone() {
       $('#chat-input').focus();
     }
   });
+}
+
+// ---------- source control ----------
+
+let diffEditor = null;
+let diffModels = null;
+
+async function refreshScm() {
+  const scm = $('#scm');
+  if (!state.workspace) { scm.classList.add('hidden'); return; }
+  try {
+    const st = await api(`/api/git/status?${q({ root: state.workspace })}`);
+    if (!st.isRepo) { scm.classList.add('hidden'); return; }
+    scm.classList.remove('hidden');
+    let branch = st.branch || '(detached)';
+    if (st.ahead) branch += ` ↑${st.ahead}`;
+    if (st.behind) branch += ` ↓${st.behind}`;
+    $('#scm-branch').textContent = branch;
+    const list = $('#scm-list');
+    list.innerHTML = '';
+    if (!st.files.length) {
+      list.innerHTML = '<div class="scm-empty">NO CHANGES</div>';
+      return;
+    }
+    for (const f of st.files) {
+      const row = document.createElement('div');
+      row.className = 'scm-item';
+      row.title = `${f.path} — click to view diff`;
+      const badge = document.createElement('span');
+      badge.className = `scm-status ${f.status}`;
+      badge.textContent = f.status;
+      const name = document.createElement('span');
+      name.className = 'scm-file';
+      name.textContent = f.path.split('/').pop();
+      row.append(badge, name);
+      const dir = f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : '';
+      if (dir) {
+        const d = document.createElement('span');
+        d.className = 'scm-dir';
+        d.textContent = dir;
+        row.appendChild(d);
+      }
+      row.addEventListener('click', () => openDiff(f.path, f.status));
+      list.appendChild(row);
+    }
+  } catch { scm.classList.add('hidden'); }
+}
+
+async function openDiff(relPath, status) {
+  await monacoReady;
+  let d;
+  try {
+    d = await api(`/api/git/diff?${q({ root: state.workspace, path: relPath })}`);
+  } catch (err) {
+    return setStatus(`diff failed: ${err.message}`);
+  }
+  if (!diffEditor) {
+    diffEditor = monaco.editor.createDiffEditor($('#diff-editor'), {
+      theme: 'batcave',
+      automaticLayout: true,
+      readOnly: true,
+      renderSideBySide: true,
+      fontSize: 13,
+      minimap: { enabled: false },
+    });
+  }
+  diffModels?.original.dispose();
+  diffModels?.modified.dispose();
+  diffModels = {
+    original: monaco.editor.createModel(d.original, undefined, monaco.Uri.parse(`git-orig:///${relPath}`)),
+    modified: monaco.editor.createModel(d.modified, undefined, monaco.Uri.parse(`git-mod:///${relPath}`)),
+  };
+  diffEditor.setModel(diffModels);
+  $('#diff-title').textContent = `${relPath} — ${status === 'U' ? 'untracked (new file)' : status === 'D' ? 'deleted' : 'working tree vs HEAD'}`;
+  $('#diff-view').classList.remove('hidden');
+  $('#editor-empty').style.display = 'none';
+}
+
+function closeDiff() {
+  $('#diff-view').classList.add('hidden');
+  diffModels?.original.dispose();
+  diffModels?.modified.dispose();
+  diffModels = null;
+  if (!state.activePath) $('#editor-empty').style.display = 'flex';
+}
+
+// ---------- clone ----------
+
+async function cloneRepo() {
+  const url = $('#clone-url').value.trim();
+  const status = $('#clone-status');
+  if (!url) { status.textContent = 'paste a git URL first'; status.className = 'mono clone-status error'; return; }
+  const btn = $('#clone-go');
+  btn.disabled = true;
+  status.textContent = 'CLONING… (large repos can take a minute)';
+  status.className = 'mono clone-status working';
+  try {
+    const { path: dest } = await api('/api/git/clone', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    status.textContent = `cloned to ${dest}`;
+    status.className = 'mono clone-status';
+    state.workspace = dest;
+    localStorage.setItem('fc.workspace', dest);
+    state.tabs.forEach((t) => t.model.dispose());
+    state.tabs = [];
+    state.activePath = null;
+    if (editor) editor.setModel(null);
+    closeDiff();
+    renderTabs();
+    updateWsLabel();
+    await loadTree();
+    await refreshScm();
+    $('#clone-modal').classList.add('hidden');
+    $('#clone-url').value = '';
+    setStatus(`cloned and opened ${dest.split('/').pop()}`);
+  } catch (err) {
+    status.textContent = err.message;
+    status.className = 'mono clone-status error';
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ---------- system HUD ----------
@@ -940,8 +1068,24 @@ function init() {
 
   wireDs4Modal();
   wireDropZone();
+
+  $('#clone-btn').addEventListener('click', () => {
+    $('#clone-modal').classList.remove('hidden');
+    $('#clone-status').textContent = '';
+    $('#clone-status').className = 'mono clone-status';
+    $('#clone-url').focus();
+  });
+  $('#clone-cancel').addEventListener('click', () => $('#clone-modal').classList.add('hidden'));
+  $('#clone-modal').addEventListener('click', (e) => {
+    if (e.target === $('#clone-modal')) $('#clone-modal').classList.add('hidden');
+  });
+  $('#clone-url').addEventListener('keydown', (e) => { if (e.key === 'Enter') cloneRepo(); });
+  $('#clone-go').addEventListener('click', cloneRepo);
+  $('#diff-close').addEventListener('click', closeDiff);
+
+  refreshScm();
   pollSystem();
-  setInterval(pollSystem, 5000);
+  setInterval(() => { pollSystem(); refreshScm(); }, 5000);
 }
 
 init();

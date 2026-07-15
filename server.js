@@ -317,6 +317,79 @@ app.get('/api/system', async (req, res) => {
   });
 });
 
+// ---------- git ----------
+
+function git(root, args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    execFile('git', ['-C', root, ...args], { maxBuffer: 8 * 1024 * 1024, timeout: opts.timeout || 15000 }, (err, stdout, stderr) => {
+      if (err) return reject(new Error((stderr || err.message).trim().slice(0, 400)));
+      resolve(stdout);
+    });
+  });
+}
+
+app.post('/api/git/clone', async (req, res) => {
+  try {
+    const url = String(req.body.url || '').trim();
+    if (!/^(https:\/\/|git@|ssh:\/\/)[\w.@:/~+-]+$/.test(url)) throw new Error('that does not look like a git URL');
+    const name = (url.split('/').pop() || 'repo').replace(/\.git$/, '') || 'repo';
+    let dest = path.join(os.homedir(), 'Downloads', name);
+    for (let n = 1; fsSync.existsSync(dest); n++) dest = path.join(os.homedir(), 'Downloads', `${name}-${n}`);
+    await new Promise((resolve, reject) => {
+      execFile('git', ['clone', url, dest], { timeout: 300000, maxBuffer: 8 * 1024 * 1024 }, (err, so, se) =>
+        err ? reject(new Error((se || err.message).trim().slice(0, 400))) : resolve());
+    });
+    res.json({ ok: true, path: dest });
+  } catch (err) {
+    sendErr(res, err);
+  }
+});
+
+app.get('/api/git/status', async (req, res) => {
+  try {
+    const root = String(req.query.root || '');
+    if (!root) return res.json({ isRepo: false });
+    const inside = await git(root, ['rev-parse', '--is-inside-work-tree']).catch(() => '');
+    if (!inside.trim()) return res.json({ isRepo: false });
+    const out = await git(root, ['status', '--porcelain=v1', '-b']);
+    const lines = out.split('\n').filter(Boolean);
+    let branch = '', ahead = 0, behind = 0;
+    if (lines[0]?.startsWith('## ')) {
+      const b = lines.shift().slice(3);
+      branch = b.split('...')[0].trim();
+      ahead = +(b.match(/ahead (\d+)/)?.[1] || 0);
+      behind = +(b.match(/behind (\d+)/)?.[1] || 0);
+    }
+    const files = lines.map((l) => {
+      const x = l[0], y = l[1];
+      let p = l.slice(3);
+      if (p.includes(' -> ')) p = p.split(' -> ')[1];
+      p = p.replace(/^"|"$/g, '');
+      return { path: p, status: x === '?' ? 'U' : (x !== ' ' ? x : y) };
+    });
+    res.json({ isRepo: true, branch, ahead, behind, files });
+  } catch (err) {
+    sendErr(res, err);
+  }
+});
+
+// Working-tree file vs HEAD, for the Monaco diff editor.
+app.get('/api/git/diff', async (req, res) => {
+  try {
+    const root = String(req.query.root || '');
+    const rel = String(req.query.path || '');
+    const abs = safeResolve(root, rel);
+    // HEAD:./path resolves relative to -C root, so subdirectory workspaces work
+    const original = await git(root, ['show', `HEAD:./${rel}`]).catch(() => ''); // empty = new/untracked
+    let modified = '';
+    try { modified = await fs.readFile(abs, 'utf8'); } catch { /* deleted from working tree */ }
+    const clean = (s) => (s.includes('\u0000') ? '[binary file]' : s.slice(0, 2_000_000));
+    res.json({ original: clean(original), modified: clean(modified) });
+  } catch (err) {
+    sendErr(res, err);
+  }
+});
+
 // ---------- chat sessions (persisted to disk) ----------
 
 const CHATS_DIR = path.join(os.homedir(), '.local-llm-ide', 'chats');

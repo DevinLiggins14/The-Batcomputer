@@ -35,6 +35,7 @@ In this project, we build a Batcomputer-styled desktop IDE for locally hosted LL
 | **Ollama** (optional)  | Any locally pulled Ollama model shows up in the model dropdown alongside DeepSeek. |
 | **Chat sessions**      | Conversations persist to `~/.local-llm-ide/chats/`; the Chats panel reopens or deletes any previous session. |
 | **Web tools**          | `web_search` and `fetch_url` are always available to the model (keyless, via DuckDuckGo) — the weights are offline, but live facts aren't. |
+| **Git integration**    | Clone any repo from the top bar; a Source Control panel shows the branch and changed files, with side-by-side Monaco diffs against HEAD. |
 
 ### **Notes for Usage**
 1. **Required**: Node.js 20+ and one local inference server — DwarfStar `ds4-server` with a DeepSeek V4 Flash GGUF (default), or an Ollama daemon with at least one pulled model.
@@ -63,7 +64,7 @@ npm start        # desktop app
 
 <img src="docs/images/editor-chat.png"/>
 
-<br/> Use <b>Open Folder</b> to pick a workspace. Files open in Monaco tabs, and Cmd+S saves to disk. The chat panel streams straight from the local model: reasoning appears live in a collapsible thoughts box, and the status bar reports tokens per second for every reply. <br/>
+<br/> Use <b>Open Folder</b> to pick a workspace, or <b>Clone</b> to clone a git URL into <code>~/Downloads</code> and open it directly. When the workspace is a git repository, a <b>Source Control</b> section in the sidebar shows the current branch and every changed file — click one for a side-by-side diff of the working tree against HEAD. Files open in Monaco tabs, and Cmd+S saves to disk. The chat panel streams straight from the local model: reasoning appears live in a collapsible thoughts box, and the status bar reports tokens per second for every reply. <br/>
 <br/> The <b>+ Active file</b> and <b>+ Selection</b> buttons attach editor content to your next message, and every code block in a reply has <b>Copy</b>, <b>Insert at cursor</b>, and <b>Replace file</b> actions. The Thinking dropdown switches between the model's three modes: <br/>
 
 | **Mode**     | **Behavior**                                                                  |

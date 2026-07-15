@@ -12,6 +12,7 @@
       The Batcomputer
     </span>
     <button id="open-folder" title="Open a workspace folder">Open Folder</button>
+    <button id="clone-btn" title="Clone a git repository into ~/Downloads and open it">Clone</button>
     <span id="ws-path" title=""></span>
     <span class="spacer"></span>
     <label>Model <select id="model-select"></select></label>
@@ -33,6 +34,13 @@
       <div id="sidebar-header">EXPLORER</div>
       <div id="ws-name" title="">NO FOLDER OPEN</div>
       <div id="file-tree"></div>
+      <div id="scm" class="hidden">
+        <div id="scm-header">
+          <span class="hud-title">SOURCE CONTROL</span>
+          <span id="scm-branch" class="scm-branch"></span>
+        </div>
+        <div id="scm-list"></div>
+      </div>
       <div id="system-hud">
         <div class="hud-title">SYSTEM</div>
         <div class="hud-row"><span class="hud-label">CPU</span><div class="hud-bar"><div id="cpu-bar"></div></div><span id="cpu-val" class="hud-val">--</span></div>
@@ -44,6 +52,14 @@
     <div id="editor-area">
       <div id="tabs"></div>
       <div id="editor"></div>
+      <div id="diff-view" class="hidden">
+        <div id="diff-bar">
+          <span id="diff-title" class="mono"></span>
+          <span class="spacer"></span>
+          <button id="diff-close">Close diff</button>
+        </div>
+        <div id="diff-editor"></div>
+      </div>
       <div id="editor-empty">
         <svg id="watermark-bat" viewBox="0 0 726 252.17" xmlns="http://www.w3.org/2000/svg"><path d="M483.92 0S481.38 24.71 466 40.11c-11.74 11.74-24.09 12.66-40.26 15.07-9.42 1.41-29.7 3.77-34.81-.79-2.37-2.11-3-21-3.22-27.62-.21-6.92-1.36-16.52-2.82-18-.75 3.06-2.49 11.53-3.09 13.61S378.49 34.3 378 36a85.13 85.13 0 0 0-30.09 0c-.46-1.67-3.17-11.48-3.77-13.56s-2.34-10.55-3.09-13.61c-1.45 1.45-2.61 11.05-2.82 18-.21 6.67-.84 25.51-3.22 27.62-5.11 4.56-25.38 2.2-34.8.79-16.16-2.47-28.51-3.39-40.21-15.13C244.57 24.71 242 0 242 0H0s69.52 22.74 97.52 68.59c16.56 27.11 14.14 58.49 9.92 74.73C170 140 221.46 140 273 158.57c69.23 24.93 83.2 76.19 90 93.6 6.77-17.41 20.75-68.67 90-93.6 51.54-18.56 103-18.59 165.56-15.25-4.21-16.24-6.63-47.62 9.93-74.73C656.43 22.74 726 0 726 0z" fill="none" stroke="currentColor" stroke-width="2.5" stroke-dasharray="9 6"/></svg>
         <div>Open a folder, then click a file — or just start chatting →</div>
@@ -112,6 +128,21 @@
       <div class="modal-buttons">
         <button id="ds4-cancel">Close</button>
         <button id="ds4-apply" class="primary">Apply &amp; Restart</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="clone-modal" class="hidden">
+    <div id="clone-panel">
+      <div class="panel-title">CLONE REPOSITORY</div>
+      <label class="field">Git URL
+        <input id="clone-url" type="text" placeholder="https://github.com/user/repo.git" />
+      </label>
+      <div class="modal-note">Clones into ~/Downloads and opens it as the workspace.</div>
+      <div id="clone-status" class="mono clone-status"></div>
+      <div class="modal-buttons">
+        <button id="clone-cancel">Close</button>
+        <button id="clone-go" class="primary">Clone</button>
       </div>
     </div>
   </div>
